@@ -1,4 +1,6 @@
 import dayjs from 'dayjs';
+import { saveAs } from 'file-saver';
+import JSZip from 'jszip';
 import mime from 'mime';
 import { filterInvalidFilenameChars, sleep } from '#shared/utils/helpers';
 import { parseCgiDataNew } from '#shared/utils/html';
@@ -28,6 +30,8 @@ export class Exporter extends BaseDownloader {
 
   // 导出的根目录
   private exportRootDirectoryHandle: FileSystemDirectoryHandle | null = null;
+  private useDownloadFallback = false;
+  private fallbackZip: JSZip | null = null;
   private readonly resources: Set<{ url: string; fakeid: string }>;
 
   constructor(urls: string[], options: DownloadOptions = {}) {
@@ -44,7 +48,7 @@ export class Exporter extends BaseDownloader {
     if (['html', 'txt', 'markdown', 'word', 'pdf'].includes(type)) {
       // 这些类型需要实时写入文件系统，提前初始化导出目录句柄
       try {
-        await this.acquireExportDirectoryHandle();
+        await this.acquireExportDirectoryHandle(type);
       } catch (err) {
         console.error(err);
         return;
@@ -73,6 +77,7 @@ export class Exporter extends BaseDownloader {
 
         // 3. 替换html中的资源路径，并写入文件系统
         await this.exportHtmlFiles();
+        await this.flushDownloadFallback();
       } else if (this.exportType === 'txt') {
         await this.exportTxtFiles();
       } else if (this.exportType === 'word') {
@@ -453,7 +458,7 @@ export class Exporter extends BaseDownloader {
 
     await this.processFileExportQueue(
       this.urls,
-      async (url) => {
+      async url => {
         const cached = await getHtmlCache(url);
         if (!cached) {
           console.warn(`文章(url: ${url} )的 html 还未下载，不能导出`);
@@ -505,7 +510,7 @@ export class Exporter extends BaseDownloader {
         const pdfBlob = await response.blob();
         await this.writeFile(filename + '.pdf', pdfBlob);
       },
-      { concurrency: 2, progressEvent: 'export:write:progress' },
+      { concurrency: 2, progressEvent: 'export:write:progress' }
     );
     await sleep(100);
   }
@@ -922,18 +927,61 @@ ${commentHTML}
   }
 
   // 获取文件存储目录
-  private async acquireExportDirectoryHandle(): Promise<void> {
-    if (!this.exportRootDirectoryHandle) {
-      // @ts-ignore
-      this.exportRootDirectoryHandle = await window.showDirectoryPicker({
-        mode: 'readwrite',
-        startIn: 'downloads',
-      });
+  private async acquireExportDirectoryHandle(type: ExportType): Promise<void> {
+    this.useDownloadFallback = false;
+    this.fallbackZip = null;
+
+    const canUseDirectoryPicker =
+      typeof window !== 'undefined' &&
+      window.isSecureContext &&
+      typeof (window as typeof window & { showDirectoryPicker?: unknown }).showDirectoryPicker === 'function';
+
+    if (!canUseDirectoryPicker) {
+      this.enableDownloadFallback(type);
+      return;
     }
+
+    if (!this.exportRootDirectoryHandle) {
+      try {
+        this.exportRootDirectoryHandle = await (
+          window as typeof window & {
+            showDirectoryPicker: (options: { mode: string; startIn: string }) => Promise<FileSystemDirectoryHandle>;
+          }
+        ).showDirectoryPicker({
+          mode: 'readwrite',
+          startIn: 'downloads',
+        });
+      } catch (err) {
+        console.warn('Failed to acquire export directory, fallback to browser download.', err);
+        this.enableDownloadFallback(type);
+      }
+    }
+  }
+
+  private enableDownloadFallback(type: ExportType): void {
+    this.useDownloadFallback = true;
+    if (type === 'html') {
+      this.fallbackZip = new JSZip();
+    }
+  }
+
+  private async flushDownloadFallback(): Promise<void> {
+    if (!this.useDownloadFallback || this.exportType !== 'html' || !this.fallbackZip) {
+      return;
+    }
+
+    const blob = await this.fallbackZip.generateAsync({ type: 'blob' });
+    saveAs(blob, 'wechat-articles-html.zip');
+    this.fallbackZip = null;
   }
 
   // 写入文件
   public async writeFile(path: string, file: Blob): Promise<void> {
+    if (this.useDownloadFallback) {
+      await this.writeFallbackFile(path, file);
+      return;
+    }
+
     const segment = path.split('/');
     const filename = segment[segment.length - 1];
     let directory = this.exportRootDirectoryHandle!;
@@ -951,6 +999,16 @@ ${commentHTML}
     const writable = await fileHandle.createWritable();
     await writable.write(file);
     await writable.close();
+  }
+
+  private async writeFallbackFile(path: string, file: Blob): Promise<void> {
+    if (this.exportType === 'html' && this.fallbackZip) {
+      this.fallbackZip.file(path, file);
+      return;
+    }
+
+    const filename = path.split('/').pop() || 'wechat-article-export';
+    saveAs(file, filename);
   }
 
   // 确定导出文件的目录名
