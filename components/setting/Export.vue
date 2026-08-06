@@ -91,6 +91,13 @@
           label="导出 HTML 中包含留言数据"
         />
       </div>
+      <div>
+        <UCheckbox
+          v-model="preferences.exportConfig.exportPdfIncludeCover"
+          name="exportPdfIncludeCover"
+          label="导出 PDF 时将封面图作为第一页"
+        />
+      </div>
     </div>
   </UCard>
 </template>

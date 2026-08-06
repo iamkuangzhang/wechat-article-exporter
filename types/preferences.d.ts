@@ -40,6 +40,9 @@ interface ExportConfig {
 
   // 导出html中是否包含评论
   exportHtmlIncludeComments: boolean;
+
+  // 导出pdf时是否将封面图作为第一页
+  exportPdfIncludeCover: boolean;
 }
 
 interface DownloadConfig {

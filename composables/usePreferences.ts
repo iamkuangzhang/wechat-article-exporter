@@ -13,6 +13,7 @@ const defaultOptions: Partial<Preferences> = {
     exportJsonIncludeComments: true,
     exportJsonIncludeContent: true,
     exportHtmlIncludeComments: true,
+    exportPdfIncludeCover: true,
   },
   downloadConfig: {
     forceDownloadContent: false,
@@ -25,8 +26,12 @@ const defaultOptions: Partial<Preferences> = {
 
 export default () => {
   //@ts-ignore
-  return useLocalStorage<Preferences>('preferences', defaultOptions, {
+  const preferences = useLocalStorage<Preferences>('preferences', defaultOptions, {
     serializer: StorageSerializers.object,
     mergeDefaults: true,
   });
+  if (preferences.value.exportConfig.exportPdfIncludeCover === undefined) {
+    preferences.value.exportConfig.exportPdfIncludeCover = true;
+  }
+  return preferences;
 };

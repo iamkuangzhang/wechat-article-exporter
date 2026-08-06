@@ -45,7 +45,7 @@ export class Exporter extends BaseDownloader {
       throw new Error('导出任务正在运行中，无需重复启动');
     }
 
-    if (['html', 'txt', 'markdown', 'word', 'pdf'].includes(type)) {
+    if (['html', 'txt', 'markdown', 'word'].includes(type)) {
       // 这些类型需要实时写入文件系统，提前初始化导出目录句柄
       try {
         await this.acquireExportDirectoryHandle(type);
@@ -124,33 +124,38 @@ export class Exporter extends BaseDownloader {
 
       // 该 html 内部的资源，包括图片、背景图片、样式
       const resources: string[] = [];
+      const addResource = (resourceUrl: string) => {
+        if (!resourceUrl || resourceUrl.startsWith('data:')) {
+          return;
+        }
+        resources.push(resourceUrl);
+        this.resources.add({ url: resourceUrl, fakeid: article.fakeid });
+      };
+
+      const coverUrl = this.getArticleCoverUrl(article, document);
+      if (coverUrl) {
+        addResource(coverUrl);
+      }
 
       // 提取图片地址
       const imgs = document.querySelectorAll<HTMLImageElement>('img');
       for (const img of imgs) {
         const imgUrl = img.getAttribute('src') || img.getAttribute('data-src');
-        if (imgUrl) {
-          resources.push(imgUrl);
-          this.resources.add({ url: imgUrl, fakeid: article.fakeid });
-        }
+        addResource(imgUrl || '');
       }
 
       // 提取样式地址
       const links = document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]');
       for (const link of links) {
         const url = link.href;
-        if (url) {
-          resources.push(url);
-          this.resources.add({ url: url, fakeid: article.fakeid });
-        }
+        addResource(url);
       }
 
       // 提取背景图片地址
       html.replaceAll(
         /((?:background|background-image): url\((?:&quot;)?)((?:https?|\/\/)[^)]+?)((?:&quot;)?\))/gs,
         (_, p1, url, p3) => {
-          resources.push(url);
-          this.resources.add({ url: url, fakeid: article.fakeid });
+          addResource(url);
           return `${p1}${url}${p3}`;
         }
       );
@@ -491,9 +496,48 @@ export class Exporter extends BaseDownloader {
           }
         }
 
+        if (preferences.value.exportConfig.exportPdfIncludeCover !== false) {
+          finalHtml = await this.prependPdfCoverPage(finalHtml, url, html, urlmap);
+        }
+
         const pdfStyleTag = `<style>
   html, body { background: white !important; background-color: white !important; }
   p { margin-block: 0.3em !important; }
+  .wechat-export-pdf-cover-page {
+    min-height: 100vh;
+    box-sizing: border-box;
+    break-after: page;
+    page-break-after: always;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 48px 42px;
+    background: #fff;
+  }
+  .wechat-export-pdf-cover-inner {
+    width: 100%;
+    max-width: 760px;
+    text-align: center;
+  }
+  .wechat-export-pdf-cover-image {
+    width: 100%;
+    max-height: 68vh;
+    object-fit: contain;
+    display: block;
+    margin: 0 auto 28px;
+  }
+  .wechat-export-pdf-cover-title {
+    margin: 0;
+    color: #111827;
+    font-size: 28px;
+    line-height: 1.35;
+    font-weight: 700;
+  }
+  .wechat-export-pdf-cover-meta {
+    margin-top: 12px;
+    color: #6b7280;
+    font-size: 14px;
+  }
 </style>`;
         finalHtml = finalHtml.replace('</head>', `${pdfStyleTag}\n</head>`);
 
@@ -522,6 +566,93 @@ export class Exporter extends BaseDownloader {
       reader.onerror = reject;
       reader.readAsDataURL(blob);
     });
+  }
+
+  private async prependPdfCoverPage(
+    finalHtml: string,
+    articleUrl: string,
+    rawHtml: string,
+    urlmap: Map<string, string>
+  ): Promise<string> {
+    const article = await getArticleByLink(articleUrl);
+    const rawDocument = new DOMParser().parseFromString(rawHtml, 'text/html');
+    const coverUrl = this.getArticleCoverUrl(article, rawDocument);
+    if (!coverUrl) {
+      return finalHtml;
+    }
+
+    const coverSrc = (await this.getMappedResourceDataUrl(coverUrl, urlmap)) || coverUrl;
+    const document = new DOMParser().parseFromString(finalHtml, 'text/html');
+    if (!document.body) {
+      return finalHtml;
+    }
+
+    const coverPage = document.createElement('section');
+    coverPage.className = 'wechat-export-pdf-cover-page';
+    coverPage.innerHTML = `
+      <div class="wechat-export-pdf-cover-inner">
+        <img class="wechat-export-pdf-cover-image" src="${this.escapeAttribute(coverSrc)}" alt="cover" />
+        <h1 class="wechat-export-pdf-cover-title">${this.escapeHtml(
+          article?.title || rawDocument.querySelector('#activity-name')?.textContent?.trim() || ''
+        )}</h1>
+        <div class="wechat-export-pdf-cover-meta">${this.escapeHtml(
+          [article?.author_name, article?.nickname].filter(Boolean).join(' · ')
+        )}</div>
+      </div>
+    `;
+    document.body.insertBefore(coverPage, document.body.firstChild);
+    return '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  }
+
+  private async getMappedResourceDataUrl(url: string, urlmap: Map<string, string>): Promise<string> {
+    const candidates = [url, url.replace(/&amp;/g, '&'), url.replace(/&/g, '&amp;')];
+
+    for (const candidate of candidates) {
+      const mapped = urlmap.get(candidate);
+      if (mapped) {
+        return mapped;
+      }
+    }
+
+    for (const candidate of candidates) {
+      const resource = await getResourceCache(candidate);
+      if (resource) {
+        return await this.blobToDataUrl(resource.file);
+      }
+    }
+
+    return '';
+  }
+
+  private getArticleCoverUrl(article: any, document: Document): string {
+    const candidates = [
+      article?.cover,
+      article?.cover_img,
+      article?.coverImg,
+      article?.pic_cdn_url_16_9,
+      article?.pic_cdn_url_235_1,
+      article?.pic_cdn_url_1_1,
+      article?.pic_cdn_url_3_4,
+      document.querySelector<HTMLImageElement>('#js_cover')?.getAttribute('data-src'),
+      document.querySelector<HTMLImageElement>('#js_cover')?.getAttribute('src'),
+      document.querySelector<HTMLMetaElement>('meta[property="og:image"]')?.getAttribute('content'),
+      document.querySelector<HTMLMetaElement>('meta[name="twitter:image"]')?.getAttribute('content'),
+    ];
+
+    return (candidates.find(item => typeof item === 'string' && item.trim()) || '').trim();
+  }
+
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  private escapeAttribute(value: string): string {
+    return this.escapeHtml(value);
   }
 
   /**
@@ -977,6 +1108,11 @@ ${commentHTML}
 
   // 写入文件
   public async writeFile(path: string, file: Blob): Promise<void> {
+    if (this.exportType === 'pdf') {
+      await this.writeFallbackFile(path, file);
+      return;
+    }
+
     if (this.useDownloadFallback) {
       await this.writeFallbackFile(path, file);
       return;
