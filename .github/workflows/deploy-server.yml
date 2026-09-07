@@ -16,6 +16,9 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
       - name: Check required secrets
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -37,6 +40,20 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$SERVER_PORT" "$SERVER_HOST" >> ~/.ssh/known_hosts
 
+      - name: Package source
+        run: |
+          tar --exclude='.git' -czf "/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz" .
+
+      - name: Upload source package
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
+        run: |
+          scp -i ~/.ssh/deploy_key -P "$SERVER_PORT" \
+            "/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz" \
+            "$SERVER_USER@$SERVER_HOST:/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz"
+
       - name: Deploy on server
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
@@ -47,11 +64,10 @@ jobs:
             "GITHUB_SHA='${GITHUB_SHA}' GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash -se" <<'REMOTE'
           set -Eeuo pipefail
 
-          REPO_URL="https://github.com/iamkuangzhang/wechat-article-exporter.git"
-          BRANCH="main"
           APP_DIR="/opt/wechat-article-exporter-src"
           DATA_DIR="/opt/wechat-article-exporter/.data"
           CANDIDATE_DATA_DIR="/opt/wechat-article-exporter/.data-candidate"
+          SOURCE_ARCHIVE="/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz"
           IMAGE_NAME="wechat-article-exporter:${GITHUB_SHA}-runtime"
           CONTAINER_NAME="wechat-article-exporter"
           CANDIDATE_NAME="${CONTAINER_NAME}-candidate"
@@ -93,22 +109,15 @@ jobs:
 
           mkdir -p "$DATA_DIR" "$CANDIDATE_DATA_DIR"
 
-          if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
-            echo "$APP_DIR exists but is not a Git repository"
+          if [ "$APP_DIR" != "/opt/wechat-article-exporter-src" ]; then
+            echo "Refusing to replace unexpected APP_DIR: $APP_DIR"
             exit 1
           fi
 
-          if [ ! -d "$APP_DIR/.git" ]; then
-            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
-          fi
-
-          git -C "$APP_DIR" remote set-url origin "$REPO_URL"
-          git -C "$APP_DIR" reset --hard
-          git -C "$APP_DIR" clean -fd
-          git -C "$APP_DIR" fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
-          git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
-          git -C "$APP_DIR" reset --hard "origin/$BRANCH"
-          git -C "$APP_DIR" clean -fd
+          rm -rf "$APP_DIR"
+          mkdir -p "$APP_DIR"
+          tar -xzf "$SOURCE_ARCHIVE" -C "$APP_DIR"
+          rm -f "$SOURCE_ARCHIVE"
 
           docker build \
             -f "$APP_DIR/Dockerfile.local" \
