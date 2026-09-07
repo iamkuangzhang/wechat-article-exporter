@@ -103,7 +103,7 @@ jobs:
           fi
 
           git -C "$APP_DIR" remote set-url origin "$REPO_URL"
-          git -C "$APP_DIR" fetch --prune origin "$BRANCH"
+          git -C "$APP_DIR" fetch --prune origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
           git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
           git -C "$APP_DIR" reset --hard "origin/$BRANCH"
           git -C "$APP_DIR" clean -fd
