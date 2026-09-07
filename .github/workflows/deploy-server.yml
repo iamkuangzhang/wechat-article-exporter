@@ -1,0 +1,146 @@
+name: Deploy to Server
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: wechat-article-exporter-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip deploy]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check required secrets
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          test -n "$SERVER_HOST"
+          test -n "$SERVER_USER"
+          test -n "$SERVER_SSH_KEY"
+
+      - name: Prepare SSH
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SERVER_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "$SERVER_PORT" "$SERVER_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$SERVER_PORT" "$SERVER_USER@$SERVER_HOST" \
+            "GITHUB_SHA='${GITHUB_SHA}' GITHUB_RUN_ID='${GITHUB_RUN_ID}' bash -se" <<'REMOTE'
+          set -Eeuo pipefail
+
+          REPO_URL="https://github.com/iamkuangzhang/wechat-article-exporter.git"
+          BRANCH="main"
+          APP_DIR="/opt/wechat-article-exporter-src"
+          DATA_DIR="/opt/wechat-article-exporter/.data"
+          CANDIDATE_DATA_DIR="/opt/wechat-article-exporter/.data-candidate"
+          IMAGE_NAME="wechat-article-exporter:${GITHUB_SHA}-runtime"
+          CONTAINER_NAME="wechat-article-exporter"
+          CANDIDATE_NAME="${CONTAINER_NAME}-candidate"
+          PREVIOUS_NAME="${CONTAINER_NAME}-previous-${GITHUB_RUN_ID}"
+
+          run_container() {
+            local name="$1"
+            local image="$2"
+            local host_port="$3"
+            local data_dir="$4"
+            local restart_policy="$5"
+
+            docker run -d \
+              --name "$name" \
+              --restart "$restart_policy" \
+              -p "${host_port}:3000" \
+              -v "${data_dir}:/app/.data" \
+              -e NUXT_APP_BASE_URL=/wechat-exporter/ \
+              -e PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+              -e PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+              -e PUPPETEER_SKIP_DOWNLOAD=true \
+              -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+              "$image"
+          }
+
+          wait_for_http() {
+            local url="$1"
+            local label="$2"
+            for i in $(seq 1 30); do
+              if curl -fsS --max-time 5 "$url" >/dev/null; then
+                echo "$label is healthy"
+                return 0
+              fi
+              sleep 2
+            done
+            echo "$label did not become healthy"
+            return 1
+          }
+
+          mkdir -p "$DATA_DIR" "$CANDIDATE_DATA_DIR"
+
+          if [ ! -d "$APP_DIR/.git" ]; then
+            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+          fi
+
+          git -C "$APP_DIR" fetch origin "$BRANCH"
+          git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+
+          docker build \
+            -f "$APP_DIR/Dockerfile.local" \
+            --build-arg VERSION="$GITHUB_SHA" \
+            -t "$IMAGE_NAME" \
+            "$APP_DIR"
+
+          docker rm -f "$CANDIDATE_NAME" >/dev/null 2>&1 || true
+          run_container "$CANDIDATE_NAME" "$IMAGE_NAME" "127.0.0.1:3001" "$CANDIDATE_DATA_DIR" "no"
+          if ! wait_for_http "http://127.0.0.1:3001/wechat-exporter/dashboard/single" "$CANDIDATE_NAME"; then
+            docker logs "$CANDIDATE_NAME" || true
+            docker rm -f "$CANDIDATE_NAME" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          docker rm -f "$CANDIDATE_NAME" >/dev/null
+
+          OLD_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+          docker rm -f "$PREVIOUS_NAME" >/dev/null 2>&1 || true
+
+          if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            docker stop "$CONTAINER_NAME"
+            docker rename "$CONTAINER_NAME" "$PREVIOUS_NAME"
+          fi
+
+          run_container "$CONTAINER_NAME" "$IMAGE_NAME" "3000" "$DATA_DIR" "always"
+          if wait_for_http "http://127.0.0.1:3000/wechat-exporter/dashboard/single" "$CONTAINER_NAME"; then
+            docker rm -f "$PREVIOUS_NAME" >/dev/null 2>&1 || true
+            exit 0
+          fi
+
+          docker logs "$CONTAINER_NAME" || true
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+          if [ -n "$OLD_IMAGE" ]; then
+            echo "Rolling back to $OLD_IMAGE"
+            run_container "$CONTAINER_NAME" "$OLD_IMAGE" "3000" "$DATA_DIR" "always"
+            wait_for_http "http://127.0.0.1:3000/wechat-exporter/dashboard/single" "$CONTAINER_NAME"
+            docker rm -f "$PREVIOUS_NAME" >/dev/null 2>&1 || true
+          elif docker inspect "$PREVIOUS_NAME" >/dev/null 2>&1; then
+            docker rename "$PREVIOUS_NAME" "$CONTAINER_NAME"
+            docker start "$CONTAINER_NAME"
+          fi
+
+          exit 1
+          REMOTE
