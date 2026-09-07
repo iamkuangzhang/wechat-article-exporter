@@ -93,12 +93,20 @@ jobs:
 
           mkdir -p "$DATA_DIR" "$CANDIDATE_DATA_DIR"
 
+          if [ -e "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
+            echo "$APP_DIR exists but is not a Git repository"
+            exit 1
+          fi
+
           if [ ! -d "$APP_DIR/.git" ]; then
             git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
           fi
 
-          git -C "$APP_DIR" fetch origin "$BRANCH"
+          git -C "$APP_DIR" remote set-url origin "$REPO_URL"
+          git -C "$APP_DIR" fetch --prune origin "$BRANCH"
+          git -C "$APP_DIR" checkout -B "$BRANCH" "origin/$BRANCH"
           git -C "$APP_DIR" reset --hard "origin/$BRANCH"
+          git -C "$APP_DIR" clean -fd
 
           docker build \
             -f "$APP_DIR/Dockerfile.local" \
