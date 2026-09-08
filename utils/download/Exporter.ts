@@ -245,7 +245,7 @@ export class Exporter extends BaseDownloader {
 
     // 检查缓存是否可用，避免重复下载相同资源
     const cached = await getResourceCache(url);
-    if (cached) {
+    if (cached && this.isUsableResourceBlob(url, cached.file)) {
       this.pending.delete(url);
       this.completed.add(url);
       return;
@@ -256,6 +256,9 @@ export class Exporter extends BaseDownloader {
 
       try {
         const blob = await this.download(fakeid, url, proxy);
+        if (!this.isUsableResourceBlob(url, blob)) {
+          throw new Error(`Unexpected resource content type: ${blob.type || 'unknown'}`);
+        }
         await updateResourceCache({
           fakeid: fakeid,
           url: url,
@@ -272,6 +275,40 @@ export class Exporter extends BaseDownloader {
 
     this.pending.delete(url);
     this.failed.add(url);
+  }
+
+  private isUsableResourceBlob(url: string, blob: Blob): boolean {
+    const type = (blob.type || '').toLowerCase();
+    if (!type) {
+      return true;
+    }
+
+    if (this.isImageResourceUrl(url)) {
+      return type.startsWith('image/') || type === 'application/octet-stream';
+    }
+
+    if (this.isStylesheetResourceUrl(url)) {
+      return type.includes('css') || type === 'text/plain' || type === 'application/octet-stream';
+    }
+
+    return !type.includes('json') && !type.includes('html');
+  }
+
+  private isImageResourceUrl(url: string): boolean {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      if (hostname.includes('qpic.cn') || hostname.includes('qlogo.cn') || hostname.includes('wxs.qq.com')) {
+        return true;
+      }
+    } catch {
+      // Fall back to extension matching for relative or malformed resource URLs.
+    }
+
+    return /\.(?:png|jpe?g|gif|webp|svg|ico)(?:[?#]|$)/i.test(url);
+  }
+
+  private isStylesheetResourceUrl(url: string): boolean {
+    return /\.css(?:[?#]|$)/i.test(url);
   }
 
   // 导出 excel 文件

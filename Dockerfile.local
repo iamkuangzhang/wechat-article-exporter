@@ -20,10 +20,12 @@ LABEL maintainer="findsource@proton.me" \
       org.opencontainers.image.description="wechat article exporter" \
       org.opencontainers.image.licenses="MIT"
 
-RUN sed -i 's#deb.debian.org#mirrors.cloud.tencent.com#g; s#security.debian.org#mirrors.cloud.tencent.com#g' /etc/apt/sources.list.d/debian.sources && \
-    apt-get update && apt-get install -y \
-    chromium fonts-noto-cjk fonts-noto-color-emoji ca-certificates \
-    --no-install-recommends && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    cp /etc/apt/sources.list.d/debian.sources /tmp/debian.sources; \
+    sed -i 's#deb.debian.org#mirrors.cloud.tencent.com#g; s#security.debian.org#mirrors.cloud.tencent.com#g' /etc/apt/sources.list.d/debian.sources; \
+    apt-get update || { cp /tmp/debian.sources /etc/apt/sources.list.d/debian.sources; apt-get update; }; \
+    apt-get install -y chromium fonts-noto-cjk fonts-noto-color-emoji ca-certificates --no-install-recommends; \
+    rm -rf /var/lib/apt/lists/* /tmp/debian.sources
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
