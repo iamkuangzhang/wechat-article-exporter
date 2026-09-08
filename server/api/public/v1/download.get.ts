@@ -7,6 +7,87 @@ import { enforceRateLimit } from '~/server/utils/rate-limit';
 interface SearchBizQuery {
   url: string;
   format: string;
+  headers?: string;
+  authorization?: string;
+}
+
+const RESOURCE_PROXY_HOST_SUFFIXES = [
+  'mp.weixin.qq.com',
+  'res.wx.qq.com',
+  'wxa.wxs.qq.com',
+  'mmbiz.qpic.cn',
+  'mmbiz.qlogo.cn',
+  'wx.qlogo.cn',
+  'thirdwx.qlogo.cn',
+  'qpic.cn',
+  'gtimg.cn',
+  'qq.com',
+];
+
+function isAllowedProxyUrl(url: URL): boolean {
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    return false;
+  }
+  const hostname = url.hostname.toLowerCase();
+  return RESOURCE_PROXY_HOST_SUFFIXES.some(suffix => hostname === suffix || hostname.endsWith(`.${suffix}`));
+}
+
+function parseForwardedHeaders(rawHeaders: unknown): Record<string, string> {
+  if (typeof rawHeaders !== 'string' || !rawHeaders.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(rawHeaders) as Record<string, unknown>;
+    const allowed = ['cookie', 'referer', 'origin', 'user-agent', 'accept'];
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .filter(([key, value]) => allowed.includes(key.toLowerCase()) && typeof value === 'string')
+        .map(([key, value]) => [key, value as string]),
+    );
+  } catch {
+    return {};
+  }
+}
+
+async function proxyWechatResource(url: string, rawHeaders: unknown): Promise<Response> {
+  const targetUrl = new URL(url);
+  if (!isAllowedProxyUrl(targetUrl)) {
+    throw createError({ statusCode: 400, statusMessage: 'url不在允许代理的微信/腾讯资源域名内' });
+  }
+
+  const forwardedHeaders = parseForwardedHeaders(rawHeaders);
+  const headers = new Headers({
+    Referer: forwardedHeaders.referer || 'https://mp.weixin.qq.com/',
+    Origin: forwardedHeaders.origin || 'https://mp.weixin.qq.com',
+    'User-Agent': forwardedHeaders['user-agent'] || USER_AGENT,
+    Accept: forwardedHeaders.accept || '*/*',
+    'Accept-Encoding': 'identity',
+  });
+  if (forwardedHeaders.cookie) {
+    headers.set('Cookie', forwardedHeaders.cookie);
+  }
+
+  const response = await fetch(targetUrl, {
+    headers,
+    redirect: 'follow',
+  });
+
+  const responseHeaders = new Headers();
+  const contentType = response.headers.get('content-type');
+  const cacheControl = response.headers.get('cache-control');
+  if (contentType) {
+    responseHeaders.set('Content-Type', contentType);
+  }
+  if (cacheControl) {
+    responseHeaders.set('Cache-Control', cacheControl);
+  }
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+  });
 }
 
 export default defineEventHandler(async event => {
@@ -25,6 +106,10 @@ export default defineEventHandler(async event => {
   }
 
   const url = decodeURIComponent(query.url.trim());
+  if (typeof query.headers === 'string' || typeof query.authorization === 'string') {
+    return proxyWechatResource(url, query.headers);
+  }
+
   if (!urlIsValidMpArticle(url)) {
     return {
       base_resp: {
