@@ -119,6 +119,15 @@ jobs:
           tar -xzf "$SOURCE_ARCHIVE" -C "$APP_DIR"
           rm -f "$SOURCE_ARCHIVE"
 
+          if ! docker image inspect wechat-article-exporter:runtime-base >/dev/null 2>&1; then
+            CURRENT_RUNTIME_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+            if [ -z "$CURRENT_RUNTIME_IMAGE" ]; then
+              echo "runtime-base is missing and no current container image is available"
+              exit 1
+            fi
+            docker tag "$CURRENT_RUNTIME_IMAGE" wechat-article-exporter:runtime-base
+          fi
+
           docker build \
             -f "$APP_DIR/Dockerfile.local" \
             --build-arg VERSION="$GITHUB_SHA" \
