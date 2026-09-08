@@ -40,19 +40,22 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -p "$SERVER_PORT" "$SERVER_HOST" >> ~/.ssh/known_hosts
 
-      - name: Package source
-        run: |
-          tar --exclude='.git' -czf "/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz" .
-
-      - name: Upload source package
+      - name: Sync source to server
         env:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_PORT: ${{ secrets.SERVER_PORT || '22' }}
         run: |
-          scp -i ~/.ssh/deploy_key -P "$SERVER_PORT" \
-            "/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz" \
-            "$SERVER_USER@$SERVER_HOST:/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz"
+          ssh -i ~/.ssh/deploy_key -p "$SERVER_PORT" "$SERVER_USER@$SERVER_HOST" \
+            "mkdir -p /opt/wechat-article-exporter-src"
+          rsync -az --delete \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='.nuxt' \
+            --exclude='.output' \
+            --exclude='.data' \
+            -e "ssh -i ~/.ssh/deploy_key -p $SERVER_PORT" \
+            ./ "$SERVER_USER@$SERVER_HOST:/opt/wechat-article-exporter-src/"
 
       - name: Deploy on server
         env:
@@ -67,7 +70,6 @@ jobs:
           APP_DIR="/opt/wechat-article-exporter-src"
           DATA_DIR="/opt/wechat-article-exporter/.data"
           CANDIDATE_DATA_DIR="/opt/wechat-article-exporter/.data-candidate"
-          SOURCE_ARCHIVE="/tmp/wechat-article-exporter-${GITHUB_SHA}.tar.gz"
           IMAGE_NAME="wechat-article-exporter:${GITHUB_SHA}-runtime"
           CONTAINER_NAME="wechat-article-exporter"
           CANDIDATE_NAME="${CONTAINER_NAME}-candidate"
@@ -114,10 +116,10 @@ jobs:
             exit 1
           fi
 
-          rm -rf "$APP_DIR"
-          mkdir -p "$APP_DIR"
-          tar -xzf "$SOURCE_ARCHIVE" -C "$APP_DIR"
-          rm -f "$SOURCE_ARCHIVE"
+          if [ ! -f "$APP_DIR/Dockerfile.local" ]; then
+            echo "Synced source is missing Dockerfile.local"
+            exit 1
+          fi
 
           if ! docker image inspect wechat-article-exporter:runtime-base >/dev/null 2>&1; then
             CURRENT_RUNTIME_IMAGE="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
